@@ -44,6 +44,24 @@ export default function BlobbyPrintStudio({
   // Zoom Loupe state
   const [showLoupe, setShowLoupe] = useState(false);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0, relX: 0, relY: 0, visible: false });
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+
+  // Track rendered canvas dimensions for pixel-perfect 1:1 overlay alignment
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const updateSize = () => {
+      if (canvasRef.current) {
+        setCanvasSize({
+          width: canvasRef.current.clientWidth,
+          height: canvasRef.current.clientHeight,
+        });
+      }
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(canvasRef.current);
+    return () => observer.disconnect();
+  }, [separationData, viewMode]);
 
   // Local parameters state
   const [localParams, setLocalParams] = useState(params);
@@ -112,29 +130,68 @@ export default function BlobbyPrintStudio({
     lCtx.strokeRect(loupeW / 2 - 4, loupeH / 2 - 4, 8, 8);
   }, [showLoupe, mousePos, separationData, activeLayers, paperType, viewMode]);
 
+  // Global drag listener so dragging split handle is smooth even if cursor moves fast or outside container
+  useEffect(() => {
+    if (!isDraggingSplit) return;
+
+    const handleGlobalMove = (e) => {
+      if (!canvasRef.current) return;
+      const canvasRect = canvasRef.current.getBoundingClientRect();
+      const canvasRelX = Math.max(0, Math.min(1, (e.clientX - canvasRect.left) / (canvasRect.width || 1)));
+      setSplitPos(canvasRelX);
+    };
+
+    const handleGlobalUp = () => {
+      setIsDraggingSplit(false);
+    };
+
+    window.addEventListener('mousemove', handleGlobalMove);
+    window.addEventListener('mouseup', handleGlobalUp);
+    return () => {
+      window.removeEventListener('mousemove', handleGlobalMove);
+      window.removeEventListener('mouseup', handleGlobalUp);
+    };
+  }, [isDraggingSplit]);
+
   // Mouse move handler for Zoom Loupe and Split slider
   const handleMouseMove = (e) => {
     if (!containerRef.current || !canvasRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const canvasRect = canvasRef.current.getBoundingClientRect();
 
-    const relX = Math.max(0, Math.min(1, x / rect.width));
-    const relY = Math.max(0, Math.min(1, y / rect.height));
+    const mouseX = e.clientX - containerRect.left;
+    const mouseY = e.clientY - containerRect.top;
 
-    const imgX = relX * canvasRef.current.width;
-    const imgY = relY * canvasRef.current.height;
+    // Relative to the actual canvas for 1:1 pixel accuracy
+    const canvasRelX = Math.max(0, Math.min(1, (e.clientX - canvasRect.left) / (canvasRect.width || 1)));
+    const canvasRelY = Math.max(0, Math.min(1, (e.clientY - canvasRect.top) / (canvasRect.height || 1)));
 
-    setMousePos({ x, y, relX, relY, imgX, imgY, visible: true });
+    const imgX = canvasRelX * canvasRef.current.width;
+    const imgY = canvasRelY * canvasRef.current.height;
+
+    const isOverCanvas =
+      e.clientX >= canvasRect.left &&
+      e.clientX <= canvasRect.right &&
+      e.clientY >= canvasRect.top &&
+      e.clientY <= canvasRect.bottom;
+
+    setMousePos({
+      x: mouseX,
+      y: mouseY,
+      relX: canvasRelX,
+      relY: canvasRelY,
+      imgX,
+      imgY,
+      visible: isOverCanvas,
+    });
 
     if (isDraggingSplit && viewMode === 'split') {
-      setSplitPos(relX);
+      setSplitPos(canvasRelX);
     }
   };
 
   const handleMouseLeave = () => {
     setMousePos((prev) => ({ ...prev, visible: false }));
-    setIsDraggingSplit(false);
   };
 
   const toggleLayer = (index) => {
@@ -281,48 +338,79 @@ export default function BlobbyPrintStudio({
             className="relative bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl flex items-center justify-center p-3 select-none"
             style={{ minHeight: '440px' }}
           >
-            {/* Background Simulated Print Canvas */}
-            <canvas
-              ref={canvasRef}
-              className="max-w-full max-h-[680px] w-auto h-auto rounded-lg shadow-md object-contain"
-            />
+            {/* Centered Canvas & Split Overlay Wrapper */}
+            <div
+              className={`relative inline-flex items-center justify-center rounded-lg shadow-md overflow-hidden max-w-full max-h-[680px] ${
+                viewMode === 'split' ? 'cursor-ew-resize' : ''
+              }`}
+              onMouseDown={(e) => {
+                if (viewMode === 'split') {
+                  e.preventDefault();
+                  setIsDraggingSplit(true);
+                  if (canvasRef.current) {
+                    const canvasRect = canvasRef.current.getBoundingClientRect();
+                    const canvasRelX = Math.max(
+                      0,
+                      Math.min(1, (e.clientX - canvasRect.left) / (canvasRect.width || 1))
+                    );
+                    setSplitPos(canvasRelX);
+                  }
+                }
+              }}
+            >
+              {/* Background Simulated Print Canvas */}
+              <canvas
+                ref={canvasRef}
+                className="max-w-full max-h-[680px] w-auto h-auto rounded-lg block"
+              />
 
-            {/* Split Comparison Overlay */}
-            {viewMode === 'split' && (adjustedImage || originalImage) && (
-              <>
-                <div
-                  className="absolute inset-y-0 left-0 overflow-hidden pointer-events-none p-3"
-                  style={{ width: `${splitPos * 100}%` }}
-                >
-                  <img
-                    src={adjustedImage || originalImage}
-                    alt="Original (Pre-Pipeline)"
-                    className="max-w-none max-h-[680px] w-auto h-auto rounded-lg"
-                    style={{
-                      width: canvasRef.current?.clientWidth,
-                      height: canvasRef.current?.clientHeight,
+              {/* Split Comparison Overlay */}
+              {viewMode === 'split' && (adjustedImage || originalImage) && (
+                <>
+                  {/* Clipped Original Photo Layer (Left Side) */}
+                  <div
+                    className="absolute inset-y-0 left-0 overflow-hidden pointer-events-none"
+                    style={{ width: `${splitPos * 100}%` }}
+                  >
+                    <img
+                      src={adjustedImage || originalImage}
+                      alt="Original (Pre-Pipeline)"
+                      className="absolute top-0 left-0 max-w-none max-h-none pointer-events-none rounded-lg"
+                      style={{
+                        width: canvasSize.width || canvasRef.current?.clientWidth || '100%',
+                        height: canvasSize.height || canvasRef.current?.clientHeight || '100%',
+                      }}
+                    />
+                    <div className="absolute top-3 left-3 bg-slate-950/85 text-white text-[11px] font-mono px-2 py-0.5 rounded border border-slate-700 flex items-center space-x-1.5 shadow-md z-10">
+                      <span>Original Photo</span>
+                      {(localParams.brightness ?? 100) !== 100 && (
+                        <span className="text-amber-400 font-semibold">({localParams.brightness}%)</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Simulated Print Label (Right Side) */}
+                  <div className="absolute top-3 right-3 bg-slate-950/85 text-amber-300 text-[11px] font-mono px-2 py-0.5 rounded border border-slate-700 flex items-center space-x-1.5 shadow-md z-10 pointer-events-none">
+                    <span>Simulated Print</span>
+                  </div>
+
+                  {/* Split Line & Handle */}
+                  <div
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setIsDraggingSplit(true);
                     }}
-                  />
-                  <div className="absolute top-6 left-6 bg-slate-950/85 text-white text-[11px] font-mono px-2 py-0.5 rounded border border-slate-700 flex items-center space-x-1.5 shadow-md">
-                    <span>Original Photo</span>
-                    {(localParams.brightness ?? 100) !== 100 && (
-                      <span className="text-amber-400 font-semibold">({localParams.brightness}%)</span>
-                    )}
+                    className="absolute top-0 bottom-0 w-0.5 bg-amber-400 cursor-ew-resize flex items-center justify-center shadow-[0_0_12px_rgba(251,191,36,0.6)] z-20"
+                    style={{ left: `${splitPos * 100}%` }}
+                  >
+                    <div className="w-6 h-6 rounded-full bg-amber-400 text-slate-950 shadow-md flex items-center justify-center text-[10px] font-bold select-none cursor-ew-resize hover:scale-110 active:scale-95 transition-transform">
+                      ↔
+                    </div>
                   </div>
-                </div>
-
-                {/* Split line handle */}
-                <div
-                  onMouseDown={() => setIsDraggingSplit(true)}
-                  className="absolute top-0 bottom-0 w-1 bg-amber-400 cursor-ew-resize flex items-center justify-center shadow-lg"
-                  style={{ left: `${splitPos * 100}%` }}
-                >
-                  <div className="w-6 h-6 rounded-full bg-amber-400 text-slate-950 shadow-md flex items-center justify-center text-[10px] font-bold">
-                    ↔
-                  </div>
-                </div>
-              </>
-            )}
+                </>
+              )}
+            </div>
 
             {/* Realtime 4x Floating Zoom Loupe */}
             {showLoupe && mousePos.visible && (
@@ -523,8 +611,8 @@ export default function BlobbyPrintStudio({
               </div>
               <input
                 type="range"
-                min="0.1"
-                max="0.9"
+                min="0.0"
+                max="1.0"
                 step="0.05"
                 value={localParams.hotspotSensitivity ?? 0.6}
                 onChange={(e) =>
@@ -533,12 +621,18 @@ export default function BlobbyPrintStudio({
                 className="w-full accent-amber-400 bg-slate-800 h-2 rounded-lg appearance-none cursor-pointer"
               />
               <div className="flex justify-between text-[10px] text-slate-500 font-mono px-0.5">
-                <span>Broad Tonal Mass</span>
-                <span className="text-amber-400 font-semibold">Dual Balanced (60%)</span>
-                <span>Micro-Accents</span>
+                <span>0% (Tonal Fidelity)</span>
+                <span className="text-amber-400 font-semibold">
+                  {(localParams.hotspotSensitivity ?? 0.6) < 0.35
+                    ? 'Global Tones'
+                    : (localParams.hotspotSensitivity ?? 0.6) <= 0.70
+                    ? 'Dual Balanced'
+                    : 'Hero Accents'}
+                </span>
+                <span>100% (Micro-Spots)</span>
               </div>
               <p className="text-[11px] text-slate-500 pt-0.5">
-                Optimizes ink selection for localized color hotspots (toe beans, accents, eyes) while preserving general picture tonal fidelity.
+                Controls dual-objective balance: low values prioritize broad gradients and global fidelity; higher values dedicate screens to localized color hotspots (toe beans, lips, eyes).
               </p>
             </div>
 
